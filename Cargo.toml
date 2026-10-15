@@ -1,0 +1,23 @@
+[package]
+name = "capture-view"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Minimal, low-overhead DirectShow capture viewer for Windows"
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Foundation", "Win32_System_Com", "Win32_System_Ole",
+  "Win32_System_LibraryLoader", "Win32_Media_DirectShow",
+  "Win32_Media_MediaFoundation", "Win32_Graphics_Gdi",
+  "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_System_Variant", "Win32_System_Memory", "Win32_System_Com_StructuredStorage"
+] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

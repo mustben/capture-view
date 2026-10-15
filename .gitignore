@@ -1,0 +1,7 @@
+/target/
+/dist/
+*.exe
+/smoke-result.json
+/smoke-frame.bmp
+*.log
+__pycache__/
