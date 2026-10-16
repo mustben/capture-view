@@ -43,7 +43,7 @@ class PEValidation(unittest.TestCase):
         for path in ['/custom/cargo/release/capture-view.exe',
                      '/custom/cargo/x86_64-pc-windows-msvc/release/capture-view.exe']:
             output = json.dumps({'reason': 'compiler-artifact', 'target': {'name': 'capture-view', 'kind': ['bin']}, 'executable': path})
-            self.assertEqual(pkg.executable_path(metadata, output), Path(path))
+            self.assertEqual(pkg.executable_path(metadata, output), Path(path).resolve())
         with self.assertRaises(ValueError):
             pkg.executable_path(metadata, '')
 
