@@ -114,7 +114,9 @@ fn run_viewer(
                     return Ok(());
                 }
                 // Coalesce presses made while the driver was opening; never queue rebuilds.
-                window.discard_refresh_requests();
+                if !window.discard_refresh_requests() {
+                    return Ok(()); // Quit observed while draining: drop fresh graph before owner/COM.
+                }
                 let (w, h) = window.client_size()?;
                 graph.resize(w, h)?;
                 window.show(graph.audio)?;

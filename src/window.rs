@@ -214,18 +214,19 @@ impl Window {
         }
         Ok(())
     }
-    pub fn discard_refresh_requests(&self) {
+    /// False means a quit request was retrieved and the caller must finish teardown.
+    pub fn discard_refresh_requests(&self) -> bool {
         let mut msg = MSG::default();
         // SAFETY: remove only queued refresh commands for this live owner on its thread.
         unsafe {
             while PeekMessageW(&mut msg, Some(self.hwnd), REFRESH, REFRESH, PM_REMOVE).as_bool() {
                 // PeekMessage retrieves WM_QUIT even outside its filter range.
                 if msg.message == WM_QUIT {
-                    PostQuitMessage(msg.wParam.0 as i32);
-                    break;
+                    return false;
                 }
             }
         }
+        true
     }
     pub fn key(&mut self, key: usize) -> Result<()> {
         if key == VK_F11.0 as usize || (key == VK_ESCAPE.0 as usize && self.fullscreen) {
@@ -337,23 +338,20 @@ mod tests {
                 Some(WPARAM(VK_F5.0 as usize)),
                 Some(LPARAM(0)),
             );
-            window.discard_refresh_requests();
+            assert!(window.discard_refresh_requests());
             assert!(
                 !PeekMessageW(&mut msg, Some(window.hwnd), REFRESH, REFRESH, PM_REMOVE).as_bool()
             );
         }
     }
     #[test]
-    fn refresh_coalescing_preserves_close_request() {
+    fn refresh_coalescing_propagates_close_request() {
         let window = Window::new().unwrap();
-        let mut msg = MSG::default();
-        // SAFETY: own thread's quit flag; consume it after checking preservation.
+        // SAFETY: own thread's quit flag; helper propagates it so caller tears down.
         unsafe {
             PostQuitMessage(0);
-            window.discard_refresh_requests();
-            assert!(PeekMessageW(&mut msg, None, WM_QUIT, WM_QUIT, PM_REMOVE).as_bool());
-            assert_eq!(msg.message, WM_QUIT);
         }
+        assert!(!window.discard_refresh_requests());
     }
     #[test]
     fn close_request_keeps_owner_alive_for_graph_teardown() {
