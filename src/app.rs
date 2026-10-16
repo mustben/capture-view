@@ -98,6 +98,7 @@ fn run_viewer(
             window::KEY if msg.hwnd == window.hwnd => window.key(msg.wParam.0)?,
             window::REFRESH if msg.hwnd == window.hwnd => {
                 if !confirmed {
+                    window.finish_refresh_request();
                     continue;
                 }
                 log_line(log, "Refresh requested: rebuilding video and audio graph.");
@@ -113,10 +114,8 @@ fn run_viewer(
                 if cancelled.load(std::sync::atomic::Ordering::Acquire) {
                     return Ok(());
                 }
-                // Coalesce presses made while the driver was opening; never queue rebuilds.
-                if !window.discard_refresh_requests() {
-                    return Ok(()); // Quit observed while draining: drop fresh graph before owner/COM.
-                }
+                // Callback-side pending flag suppresses additional requests throughout reopen.
+                window.finish_refresh_request();
                 let (w, h) = window.client_size()?;
                 graph.resize(w, h)?;
                 window.show(graph.audio)?;

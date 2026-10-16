@@ -1,5 +1,8 @@
 //! Win32 shell. Re-entrant callbacks post work to the owning message loop.
-use std::{cell::RefCell, mem::size_of};
+use std::{
+    cell::{Cell, RefCell},
+    mem::size_of,
+};
 use windows::Win32::Media::DirectShow::IVideoWindow;
 use windows::{
     Win32::{
@@ -17,6 +20,7 @@ use windows::{
 // so nested Win32 size/move loops can resize the preview without aliasing app state.
 thread_local! {
     static RENDERER: RefCell<Option<(IVideoWindow,i32,i32)>> = const { RefCell::new(None) };
+    static REFRESH_PENDING: Cell<bool> = const { Cell::new(false) };
 }
 pub fn set_renderer(renderer: Option<(IVideoWindow, i32, i32)>) {
     let previous = RENDERER.with(|slot| slot.replace(renderer));
@@ -42,6 +46,17 @@ pub const TOGGLE: u32 = WM_APP + 2;
 pub const KEY: u32 = WM_APP + 3;
 pub const REFRESH: u32 = WM_APP + 4;
 
+fn request_refresh(hwnd: HWND) -> Result<()> {
+    if !REFRESH_PENDING.with(|pending| pending.replace(true)) {
+        // SAFETY: posts to our live owner; no graph work occurs inside callbacks.
+        if let Err(error) = unsafe { PostMessageW(Some(hwnd), REFRESH, WPARAM(0), LPARAM(0)) } {
+            REFRESH_PENDING.with(|pending| pending.set(false));
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 fn refresh_menu(hwnd: HWND) -> Result<()> {
     // SAFETY: native popup is used on the owner thread, then destroyed even on error.
     unsafe {
@@ -61,7 +76,7 @@ fn refresh_menu(hwnd: HWND) -> Result<()> {
             )
             .0 == 1
             {
-                PostMessageW(Some(hwnd), REFRESH, WPARAM(0), LPARAM(0))?;
+                request_refresh(hwnd)?;
             }
             Ok(())
         })();
@@ -91,7 +106,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: 
             }
             WM_KEYDOWN if wp.0 == VK_F5.0 as usize => {
                 if lp.0 & (1 << 30) == 0 {
-                    let _ = PostMessageW(Some(hwnd), REFRESH, wp, lp);
+                    let _ = request_refresh(hwnd);
                 }
                 LRESULT(0)
             }
@@ -214,19 +229,9 @@ impl Window {
         }
         Ok(())
     }
-    /// False means a quit request was retrieved and the caller must finish teardown.
-    pub fn discard_refresh_requests(&self) -> bool {
-        let mut msg = MSG::default();
-        // SAFETY: remove only queued refresh commands for this live owner on its thread.
-        unsafe {
-            while PeekMessageW(&mut msg, Some(self.hwnd), REFRESH, REFRESH, PM_REMOVE).as_bool() {
-                // PeekMessage retrieves WM_QUIT even outside its filter range.
-                if msg.message == WM_QUIT {
-                    return false;
-                }
-            }
-        }
-        true
+    pub fn finish_refresh_request(&self) {
+        // All callbacks/graph work share this STA. No Windows messages are consumed here.
+        REFRESH_PENDING.with(|pending| pending.set(false));
     }
     pub fn key(&mut self, key: usize) -> Result<()> {
         if key == VK_F11.0 as usize || (key == VK_ESCAPE.0 as usize && self.fullscreen) {
@@ -296,6 +301,7 @@ impl Window {
 }
 impl Drop for Window {
     fn drop(&mut self) {
+        self.finish_refresh_request();
         // SAFETY: destroy only our still-live window, on its creating thread.
         unsafe {
             if IsWindow(Some(self.hwnd)).as_bool() {
@@ -314,44 +320,41 @@ mod tests {
         let mut msg = MSG::default();
         // SAFETY: synchronous input on this test's window/thread; inspect only REFRESH messages.
         unsafe {
-            SendMessageW(
-                window.hwnd,
-                WM_KEYDOWN,
-                Some(WPARAM(VK_F5.0 as usize)),
-                Some(LPARAM(0)),
-            );
-            SendMessageW(
-                window.hwnd,
-                WM_KEYDOWN,
-                Some(WPARAM(VK_F5.0 as usize)),
-                Some(LPARAM(1 << 30)),
-            );
+            for flags in [0, 1 << 30, 0] {
+                SendMessageW(
+                    window.hwnd,
+                    WM_KEYDOWN,
+                    Some(WPARAM(VK_F5.0 as usize)),
+                    Some(LPARAM(flags)),
+                );
+            }
             assert!(
                 PeekMessageW(&mut msg, Some(window.hwnd), REFRESH, REFRESH, PM_REMOVE).as_bool()
             );
             assert!(
                 !PeekMessageW(&mut msg, Some(window.hwnd), REFRESH, REFRESH, PM_REMOVE).as_bool()
             );
+            // A fresh press while reopening must not queue another rebuild.
             SendMessageW(
                 window.hwnd,
                 WM_KEYDOWN,
                 Some(WPARAM(VK_F5.0 as usize)),
                 Some(LPARAM(0)),
             );
-            assert!(window.discard_refresh_requests());
             assert!(
                 !PeekMessageW(&mut msg, Some(window.hwnd), REFRESH, REFRESH, PM_REMOVE).as_bool()
             );
+            window.finish_refresh_request();
+            SendMessageW(
+                window.hwnd,
+                WM_KEYDOWN,
+                Some(WPARAM(VK_F5.0 as usize)),
+                Some(LPARAM(0)),
+            );
+            assert!(
+                PeekMessageW(&mut msg, Some(window.hwnd), REFRESH, REFRESH, PM_REMOVE).as_bool()
+            );
         }
-    }
-    #[test]
-    fn refresh_coalescing_propagates_close_request() {
-        let window = Window::new().unwrap();
-        // SAFETY: own thread's quit flag; helper propagates it so caller tears down.
-        unsafe {
-            PostQuitMessage(0);
-        }
-        assert!(!window.discard_refresh_requests());
     }
     #[test]
     fn close_request_keeps_owner_alive_for_graph_teardown() {
