@@ -11,7 +11,7 @@ Base: `04d903f7bde478c5c71d6cc5f1625873513f3a5f` (`test`). No intervening commit
 | CV-05 | Confirmed after checking locked windows 0.62 binding: GetState maps successful HRESULT to the numeric state. Local vtable call retains HRESULT; only S_OK plus Running confirms startup. Intermediate/unknown status is not running. | Zero-wait polling, separate graph errors and 10-second confirmation deadline after Run returns. Pure status tests. Confirmation does not prove HDMI activity, audible sound or synchronization. |
 | CV-06 | Confirmed. Hardware-free policy/parser/PE/packaging tests added. UI waits poll conditions and detect process exit, select CaptureViewWindow with renderer belonging to launched PID. | UI/hardware tests remain opt-in; actual Windows hardware validation pending. |
 | CV-07 | To reproduce. Existing mixed-DPI behavior deliberately unchanged: no evidence here justifies changing saved placement/fullscreen handling. | Manual two-monitor checklist in TESTING.md; no mixed-DPI hardware available in this environment. |
-| CV-08 | Confirmed maintenance improvement. Rust 1.93.0 pinned, actions pinned to verified v4.2.2/v4.6.2 commit references; locked builds, read-only contents permission, 20-minute job deadline. | Update toolchain/action pins through reviewed changes and run Windows CI. Source archive includes toolchain and new tests/docs. |
+| CV-08 | Confirmed maintenance improvement. Rust 1.93.0 pinned, checkout v7.0.1 and upload-artifact v7.0.2 pinned to verified commit references using Node.js 24; locked builds, read-only contents permission, 20-minute job deadline. | Update toolchain/action pins through reviewed changes and run Windows CI. Source archive includes toolchain and new tests/docs. |
 
 ## Opening cancellation and simulation
 
