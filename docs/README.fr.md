@@ -6,7 +6,7 @@ Une fenêtre qui affiche le boîtier d'acquisition et joue son audio. Rien de pl
 
 1. Brancher le GC550 en USB 3, installer son pilote et connecter/allumer la source HDMI.
 2. Fermer OBS ou RECentral si l'un d'eux utilise le boîtier.
-3. Lancer `CaptureView.exe`.
+3. Lancer `CaptureView.exe`. Une fenêtre indique l’ouverture en cours. Sa fermeture demande l’annulation ; un appel déjà bloqué dans le pilote doit revenir avant la libération du boîtier.
 
 Redimensionner en tirant les bords. Double-cliquer sur l'image ou appuyer sur **F11** pour le plein écran. **Échap** revient à la fenêtre. La croix ou **Alt+F4** ferme l'application et libère le boîtier.
 
@@ -20,7 +20,7 @@ Le pilote expose le flux via DirectShow. L'application relie ce flux aux moteurs
 
 ## Compilation
 
-Installer Rust stable 1.93+ et Visual Studio Build Tools (développement C++ de bureau + Windows SDK), puis, depuis le dossier du projet :
+Installer Rust 1.93.0 (version fixée dans `rust-toolchain.toml`, minimum annoncé : 1.93) et Visual Studio Build Tools (développement C++ de bureau + Windows SDK), puis, depuis le dossier du projet :
 
 ```powershell
 cargo build --release --locked
@@ -39,3 +39,5 @@ Journal : `%LOCALAPPDATA%\CaptureView\last-run.log` (remplacé à chaque lanceme
 - Après débranchement : fermer puis relancer l'application.
 
 Un seul boîtier AVerMedia à la fois. Pas d'enregistrement, d'auto-reconnexion, de sélection d'entrée ni de contournement HDCP. Le projet ne distribue aucun pilote ou code propriétaire. Licence MIT. Dépôt : https://github.com/mustben/capture-view ; versions Windows dans la section Releases.
+
+Le packaging (`python scripts/package.py`) recompile la release avec le verrou Cargo, vérifie le binaire PE Windows x64 graphique et prépare les archives et leurs sommes SHA-256 avant de remplacer les anciennes. Les corrections de la revue et leurs limites sont détaillées dans [REVIEW_CORRECTIONS.md](REVIEW_CORRECTIONS.md).

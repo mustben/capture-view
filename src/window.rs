@@ -104,7 +104,7 @@ impl Window {
                 lpszClassName: w!("CaptureViewWindow"),
                 ..Default::default()
             };
-            if RegisterClassW(&class) == 0 {
+            if RegisterClassW(&class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
                 return Err(windows::core::Error::from_thread());
             }
             let hwnd = CreateWindowExW(
@@ -129,6 +129,28 @@ impl Window {
                     ..Default::default()
                 },
             })
+        }
+    }
+    pub fn title(&self, text: &str) -> Result<()> {
+        let title: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        // SAFETY: title lives through the call; this thread owns hwnd.
+        unsafe { SetWindowTextW(self.hwnd, PCWSTR(title.as_ptr())) }
+    }
+    pub fn show_opening(&self) -> Result<()> {
+        self.title("CaptureView — ouverture du boîtier…")?;
+        // SAFETY: live window owned by this thread; timer is dispatched by its loop.
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_SHOW);
+            if SetTimer(Some(self.hwnd), 1, 100, None) == 0 {
+                return Err(windows::core::Error::from_thread());
+            }
+        }
+        Ok(())
+    }
+    pub fn hide(&self) {
+        // SAFETY: this thread owns the live window; it remains alive until Drop.
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
     }
     pub fn show(&self, audio: bool) -> Result<()> {

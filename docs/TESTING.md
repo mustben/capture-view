@@ -7,9 +7,11 @@ cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 cargo build --release --locked
+python -m unittest discover -s scripts -p "test_*.py"
+python scripts/package.py
 ```
 
-Unit tests exercise small/portrait/4:3 layouts, invalid dimensions, and the native close-before-destroy lifetime regression. They do not simulate capture hardware.
+Unit tests exercise layouts, unreadable/ambiguous/missing-device selection, checked BMP headers/palettes/bounds, intermediate HRESULTs and confirmation deadlines, and the native close-before-destroy lifetime regression. Python tests inject malformed PE files and packaging/publication failures and verify Cargo artifact paths, licenses, ZIP entries and checksums. CI separately tests a visible, responsive opening shell and cancellation during a simulated delay before driver access. They do not simulate capture hardware.
 
 ## Real hardware smoke test
 
@@ -60,3 +62,17 @@ Do not promote this to broad model compatibility or invent latency benchmarks. A
 - [ ] Multiple displays and DPI scales; fullscreen restores previous placement.
 - [ ] Close then reopen; OBS can reacquire the device after CaptureView closes.
 - [ ] Explicit, recoverable error for unplugged/in-use devices; no leftover process.
+
+## Acceptance for review corrections
+
+Use Rust 1.93.0 from `rust-toolchain.toml`. The per-ID assessment and slow-opening simulation procedure are in [REVIEW_CORRECTIONS.md](REVIEW_CORRECTIONS.md). To run the CI opening-shell test manually on Windows without capture hardware:
+
+```powershell
+$env:CAPTUREVIEW_TEST_EXE = (Resolve-Path target/release/capture-view.exe).Path
+python scripts/test_opening.py
+Remove-Item Env:CAPTUREVIEW_TEST_EXE
+```
+
+This proves message processing and cancellation during a simulated pre-driver delay only. Test normal opening, no device, occupied device, close during actual driver opening, and device reacquisition separately on real hardware. Inspect the generated BMP locally; do not upload the private frame.
+
+For mixed DPI, use two monitors with different scale factors (for example 100% and 150%): move the window in both directions, enter fullscreen on each, change scale while fullscreen, leave fullscreen and verify usable restored position and size. Record Windows build, scales and observed geometry. No mixed-DPI defect has been reproduced during this correction; that path is unchanged.

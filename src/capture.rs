@@ -1,5 +1,5 @@
 //! Owns the DirectShow graph. No video frames pass through Rust during playback.
-//! COM calls stay on the main STA thread; interface wrappers release references on drop.
+//! COM calls stay on the viewer STA thread; interface wrappers release references on drop.
 use std::ptr;
 use windows::{
     Win32::{
@@ -31,7 +31,7 @@ impl Capture {
             let builder: ICaptureGraphBuilder2 =
                 CoCreateInstance(&CLSID_CaptureGraphBuilder2, None, CLSCTX_INPROC_SERVER)?;
             builder.SetFiltergraph(&graph)?;
-            let (source, device_name) = find_device()?;
+            let (source, device_name) = find_device(log)?;
             log(&format!("Device: {device_name}"));
             graph.AddFilter(&source, w!("Capture device"))?;
             // Retain the driver default; do not guess modes or frame rates.
@@ -92,10 +92,7 @@ impl Capture {
             result.attach_resize();
             result.video.SetVisible(-1)?;
             result.control.Run()?;
-            log(&format!(
-                "Graph state: {} (2 = running)",
-                result.control.GetState(3000)?
-            ));
+            log("Graph Run requested; confirmation is polled by the viewer loop.");
             Ok(result)
         }
     }
@@ -127,9 +124,23 @@ impl Capture {
         // SAFETY: video is a live COM interface on its creating STA thread.
         unsafe { self.video.SetWindowPosition(x, y, w, h) }
     }
+    pub fn state(&self) -> Result<crate::graph_state::State> {
+        let mut state = 0;
+        // windows 0.62 maps GetState through HRESULT::map, discarding positive status.
+        // SAFETY: call the generated vtable on this interface's creating STA; valid out pointer.
+        let hr = unsafe {
+            (Interface::vtable(&self.control).GetState)(
+                Interface::as_raw(&self.control),
+                0,
+                &mut state,
+            )
+        };
+        crate::graph_state::classify(hr.0, state)
+            .map_err(|code| windows::core::Error::from_hresult(windows::core::HRESULT(code)))
+    }
     pub fn running(&self) -> bool {
-        // SAFETY: queried on the creating STA thread.
-        unsafe { self.control.GetState(1000).is_ok_and(|s| s == 2) }
+        self.state()
+            .is_ok_and(|state| state == crate::graph_state::State::Running)
     }
     pub fn save_frame(
         &self,
@@ -138,30 +149,34 @@ impl Capture {
         // Diagnostic only. Playback itself never allocates or copies a frame in Rust.
         // SAFETY: the renderer is paused; the provided aligned buffer has the reported size.
         unsafe {
-            self.control.Pause()?;
-            let _ = self.control.GetState(2000);
             let capture = (|| -> std::result::Result<(), Box<dyn std::error::Error>> {
+                self.control.Pause()?;
+                self.control.GetState(2000)?;
                 let mut size = 0;
                 self.basic.GetCurrentImage(&mut size, ptr::null_mut())?;
                 if !(40..=128 * 1024 * 1024).contains(&size) {
                     return Err("Invalid DIB size".into());
                 }
-                let mut data = vec![0i32; (size as usize).div_ceil(4)];
+                let capacity = size as usize;
+                let mut data = vec![0i32; capacity.div_ceil(4)];
                 self.basic.GetCurrentImage(&mut size, data.as_mut_ptr())?;
+                if size < 40 || size as usize > capacity {
+                    return Err("Invalid returned DIB size".into());
+                }
                 let bytes = std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), size as usize);
-                let mut bmp = Vec::with_capacity(size as usize + 14);
-                bmp.extend_from_slice(b"BM");
-                bmp.extend_from_slice(&(size as u32 + 14).to_le_bytes());
-                bmp.extend_from_slice(&[0; 4]);
-                // VMR9 returns a 32-bit BI_RGB DIB with no color table.
-                let header_size = u32::from_le_bytes(bytes[0..4].try_into()?);
-                bmp.extend_from_slice(&(14 + header_size).to_le_bytes());
-                bmp.extend_from_slice(bytes);
+                let bmp = crate::dib::to_bmp(bytes)?;
                 std::fs::write(path, bmp)?;
                 Ok(())
             })();
-            self.control.Run()?;
-            capture
+            let resume = self.control.Run();
+            match (capture, resume) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), Ok(())) => Err(error),
+                (Ok(()), Err(error)) => Err(format!("Playback resume failed: {error}").into()),
+                (Err(error), Err(resume)) => {
+                    Err(format!("{error}; playback resume also failed: {resume}").into())
+                }
+            }
         }
     }
     pub fn drain_error(&mut self) -> Option<String> {
@@ -205,39 +220,62 @@ impl Drop for Capture {
     }
 }
 
-unsafe fn find_device() -> Result<(IBaseFilter, String)> {
+unsafe fn find_device(log: &mut dyn FnMut(&str)) -> Result<(IBaseFilter, String)> {
     // SAFETY: all COM objects are used locally under initialized STA; no raw pointer escapes.
     unsafe {
         let devices: ICreateDevEnum =
             CoCreateInstance(&CLSID_SystemDeviceEnum, None, CLSCTX_INPROC_SERVER)?;
         let mut enumerator = None;
         devices.CreateClassEnumerator(&CLSID_VideoInputDeviceCategory, &mut enumerator, 0)?;
-        let mut found = Vec::new();
+        let mut selection = crate::selection::Selection::new();
         if let Some(enumerator) = enumerator {
-            let mut items = [None];
-            while enumerator.Next(&mut items, None) == windows::Win32::Foundation::S_OK {
-                if let Some(moniker) = items[0].take() {
+            let mut index = 0;
+            loop {
+                let mut items = [None];
+                let status = enumerator.Next(&mut items, None);
+                if status == windows::Win32::Foundation::S_FALSE {
+                    break;
+                }
+                if status != windows::Win32::Foundation::S_OK {
+                    status.ok()?;
+                    return Err(windows::core::Error::new(
+                        windows::Win32::Foundation::E_FAIL,
+                        "Unexpected device enumeration status",
+                    ));
+                }
+                index += 1;
+                let moniker = items[0].take().ok_or_else(|| {
+                    windows::core::Error::new(
+                        windows::Win32::Foundation::E_FAIL,
+                        "Enumerator returned no device",
+                    )
+                })?;
+                let name = (|| -> Result<String> {
                     let bag: IPropertyBag = moniker.BindToStorage(None, None)?;
                     let mut value = VARIANT::default();
                     bag.Read(w!("FriendlyName"), &mut value, None)?;
-                    let name = BSTR::try_from(&value)?.to_string();
-                    if name.to_ascii_lowercase().contains("avermedia") {
-                        found.push((moniker, name));
-                    }
+                    Ok(BSTR::try_from(&value)?.to_string())
+                })();
+                if let Err(error) = &name {
+                    // Index/HRESULT only: do not expose device IDs or unreadable properties.
+                    log(&format!(
+                        "Skipping unreadable video device #{index}: HRESULT {}",
+                        error.code()
+                    ));
                 }
+                selection.observe(moniker, name.map_err(|_| ()));
             }
         }
-        if found.len() != 1 {
-            return Err(windows::core::Error::new(
-                windows::Win32::Foundation::E_FAIL,
-                if found.is_empty() {
-                    "Aucun boîtier AVerMedia détecté. Vérifiez le câble USB et le pilote."
-                } else {
-                    "Plusieurs boîtiers AVerMedia détectés. Ne branchez qu'un seul boîtier."
-                },
-            ));
-        }
-        let (moniker, name) = found.pop().unwrap();
-        Ok((moniker.BindToObject(None, None)?, name))
+        let (moniker, name) = selection.finish().map_err(|message| {
+            windows::core::Error::new(windows::Win32::Foundation::E_FAIL, message)
+        })?;
+        // Opening the selected card is intentionally not swallowed as a property error.
+        let source = moniker.BindToObject(None, None).map_err(|error| {
+            windows::core::Error::new(
+                error.code(),
+                format!("Unable to open selected AVerMedia: {error}"),
+            )
+        })?;
+        Ok((source, name))
     }
 }
