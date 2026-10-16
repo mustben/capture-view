@@ -61,6 +61,16 @@ def run():
             u.EnumWindows(callback_type(find), 0)
             return hwnd
         wait_for(proc, locate, 'CaptureViewWindow with video renderer (not an error dialog)', 20)
+        log_path = Path(os.environ['LOCALAPPDATA'])/'CaptureView/last-run.log'
+        def startup_confirmed():
+            try:
+                return 'Graph startup confirmed (S_OK, Running)' in log_path.read_text(encoding='utf-8')
+            except (FileNotFoundError, PermissionError):
+                return False
+        # The renderer HWND exists before its final layout is negotiated. The launched
+        # process truncates its log before creating any window; do not measure the
+        # initial aspect until that process confirms S_OK/Running.
+        wait_for(proc, startup_confirmed, 'confirmed graph startup before geometry measurement', 15)
 
         def size(handle, client=False):
             rect = w.RECT()
@@ -106,7 +116,6 @@ def run():
             return bool(u.GetWindowLongPtrW(hwnd, -16) & 0x80000000)
 
         # Explicit hardware-only refresh: exercise the real renderer's keyboard forwarding.
-        log_path = Path(os.environ['LOCALAPPDATA'])/'CaptureView/last-run.log'
         def refresh_count():
             try:
                 return log_path.read_text(encoding='utf-8').count('Refresh confirmed:')

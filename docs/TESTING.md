@@ -53,6 +53,14 @@ This launches only its own viewer process. It starts the real Windows modal sizi
 
 Do not promote this to broad model compatibility or invent latency benchmarks. A future compatibility contribution should state exact device model, driver, Windows build, USB connection, video format and whether both picture and audible sound were tested.
 
+## Integration follow-up validation
+
+- Reproduced the proposed UI test failure before changing it: initial renderer aspect was sampled before the graph reached S_OK/Running. The hardware UI script now waits for the launched process's explicit startup confirmation before measuring geometry.
+- Added native Rust regression tests for status-shell notification handling outside the outer app loop, cancellation winning over late Ready messages, late opening errors, and cleanup of a successfully opened-but-cancelled resource.
+- Status handoff uses window messages instead of polling a Ready channel from the outer loop, so modal move/size/menu loops cannot defer it. The viewer remains hidden until startup confirmation. A real GC550 run verified shell handoff while actively inside Windows' sizing loop, with only the viewer visible after confirmation.
+- Cancelled initial/refresh failures are logged without an error dialog; genuine failures still propagate. Driver calls themselves remain non-cancellable.
+- Windows validation: 18 Rust tests, Python packaging tests, explicit opening-cancellation test, GC550 hardware smoke, repeated native UI tests with windowed/fullscreen F5, release build and real packaging passed. No end-to-end latency or long-session AV-drift guarantee is implied.
+
 ## Manual acceptance checklist
 
 - [ ] Active HDMI picture (motion) and audible sound, correct channels.

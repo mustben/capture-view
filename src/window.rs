@@ -21,6 +21,7 @@ use windows::{
 thread_local! {
     static RENDERER: RefCell<Option<(IVideoWindow,i32,i32)>> = const { RefCell::new(None) };
     static REFRESH_PENDING: Cell<bool> = const { Cell::new(false) };
+    static CLOSE_REQUESTED: Cell<bool> = const { Cell::new(false) };
 }
 pub fn set_renderer(renderer: Option<(IVideoWindow, i32, i32)>) {
     let previous = RENDERER.with(|slot| slot.replace(renderer));
@@ -45,6 +46,25 @@ pub fn resize_renderer(hwnd: HWND) {
 pub const TOGGLE: u32 = WM_APP + 2;
 pub const KEY: u32 = WM_APP + 3;
 pub const REFRESH: u32 = WM_APP + 4;
+const STATUS_READY: u32 = WM_APP + 5;
+const STATUS_REFRESHING: u32 = WM_APP + 6;
+
+/// Non-owning message destination, NOT a transferred HWND/COM owner. The main
+/// thread keeps the status window alive until the viewer has joined.
+#[derive(Clone, Copy)]
+pub struct StatusTarget(isize);
+impl StatusTarget {
+    pub fn ready(self) -> Result<()> {
+        self.post(STATUS_READY)
+    }
+    pub fn refreshing(self) -> Result<()> {
+        self.post(STATUS_REFRESHING)
+    }
+    fn post(self, message: u32) -> Result<()> {
+        // SAFETY: PostMessage is cross-thread-safe; the owner outlives this sender.
+        unsafe { PostMessageW(Some(HWND(self.0 as *mut _)), message, WPARAM(0), LPARAM(0)) }
+    }
+}
 
 fn request_refresh(hwnd: HWND) -> Result<()> {
     if !REFRESH_PENDING.with(|pending| pending.replace(true)) {
@@ -89,6 +109,21 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: 
     // SAFETY: Win32 supplies valid message parameters; no Rust pointers are dereferenced.
     unsafe {
         match message {
+            STATUS_READY => {
+                if !CLOSE_REQUESTED.with(Cell::get) {
+                    // Callback handling survives modal move/size/menu loops; no app-state borrow.
+                    SendMessageW(hwnd, WM_CANCELMODE, None, None);
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
+                LRESULT(0)
+            }
+            STATUS_REFRESHING => {
+                if !CLOSE_REQUESTED.with(Cell::get) {
+                    let _ = SetWindowTextW(hwnd, w!("CaptureView — rafraîchissement du flux…"));
+                    let _ = ShowWindow(hwnd, SW_SHOW);
+                }
+                LRESULT(0)
+            }
             WM_SIZE | WM_EXITSIZEMOVE => {
                 resize_renderer(hwnd);
                 LRESULT(0)
@@ -131,6 +166,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: 
                 LRESULT(0)
             }
             WM_CLOSE => {
+                CLOSE_REQUESTED.with(|closing| closing.set(true));
                 // Keep the owner alive until Capture has stopped and detached its renderer.
                 PostQuitMessage(0);
                 LRESULT(0)
@@ -149,7 +185,21 @@ pub struct Window {
     placement: WINDOWPLACEMENT,
 }
 impl Window {
+    pub fn status_target(&self) -> StatusTarget {
+        StatusTarget(self.hwnd.0 as isize)
+    }
+    pub fn start_polling(&self) -> Result<()> {
+        // SAFETY: the hidden viewer is owned by this thread. No window is shown
+        // until S_OK/Running is confirmed; the separate status shell remains visible.
+        unsafe {
+            if SetTimer(Some(self.hwnd), 1, 1000, None) == 0 {
+                return Err(windows::core::Error::from_thread());
+            }
+        }
+        Ok(())
+    }
     pub fn new() -> Result<Self> {
+        CLOSE_REQUESTED.with(|closing| closing.set(false));
         // SAFETY: strings are static and window_proc has the correct Win32 ABI.
         unsafe {
             let instance = GetModuleHandleW(None)?;
@@ -314,6 +364,32 @@ impl Drop for Window {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn close_request_ignores_late_ready_notification() {
+        let window = Window::new().unwrap();
+        window.show_opening().unwrap();
+        // SAFETY: this test owns the live window; close must not destroy it yet.
+        unsafe {
+            SendMessageW(window.hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+            SendMessageW(window.hwnd, STATUS_READY, Some(WPARAM(0)), Some(LPARAM(0)));
+            assert!(IsWindowVisible(window.hwnd).as_bool());
+        }
+    }
+    #[test]
+    fn status_ready_is_handled_by_window_callback() {
+        let window = Window::new().unwrap();
+        window.show_opening().unwrap();
+        // SendMessage dispatches the callback directly, without the outer app loop:
+        // this is also where posted status notifications land in a modal size loop.
+        unsafe {
+            assert!(IsWindowVisible(window.hwnd).as_bool());
+            SendMessageW(window.hwnd, WM_APP + 5, Some(WPARAM(0)), Some(LPARAM(0)));
+            assert!(
+                !IsWindowVisible(window.hwnd).as_bool(),
+                "opening shell must hide without polling the outer loop"
+            );
+        }
+    }
     #[test]
     fn f5_posts_one_refresh_and_ignores_key_repeat() {
         let window = Window::new().unwrap();

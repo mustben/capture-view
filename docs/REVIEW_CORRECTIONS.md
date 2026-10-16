@@ -15,7 +15,7 @@ Base: `04d903f7bde478c5c71d6cc5f1625873513f3a5f` (`test`). No intervening commit
 
 ## Opening cancellation and simulation
 
-The visible status shell and viewer use different UI threads. A single viewer STA owns every graph interface and renderer clone, its owner HWND and COM apartment. The status shell never controls COM. After opening returns, cancellation is checked before showing the viewer; a cancellation race is also checked by the viewer message loop. Errors are logged/reported even when a close request overlaps a driver error. A stuck driver can keep the process alive with a responsive waiting status; terminating that process externally forfeits graceful teardown guarantees.
+The visible status shell and viewer use different UI threads. A single viewer STA owns every graph interface and renderer clone, its owner HWND and COM apartment. The status shell never controls COM. After opening returns, cancellation is checked before showing the viewer; a cancellation race is also checked by the viewer message loop. If cancellation overlaps an opening/refresh error, the error is logged but its modal dialog is suppressed; cancellation completes normally once the driver returns. Non-cancelled failures remain reported. A stuck driver can keep the process alive with a responsive waiting status; terminating that process externally forfeits graceful teardown guarantees.
 
 For a reproducible slow-opening UI check without assuming a slow driver:
 
