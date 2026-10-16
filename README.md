@@ -16,11 +16,12 @@ Download and extract **CaptureView-windows-x64.zip** from [Releases](https://git
 
 1. Install the appropriate AVerMedia driver, plug the device into USB 3 and connect the HDMI source.
 2. Close OBS/RECentral or any application already using that device.
-3. Launch `CaptureView.exe`.
+3. Launch `CaptureView.exe`. An opening status window appears while the viewer initializes. Closing it requests cancellation; a driver call already in progress must return before cleanup can finish.
 
 - Drag the window edges to resize. The image keeps its aspect ratio.
 - Double-click the picture or press **F11** to toggle fullscreen.
 - **Escape** leaves fullscreen. **Alt+F4** or the close button exits.
+- Press **F5** or right-click the picture → **Rafraîchir le flux** to rebuild video and audio together if they drift out of sync. Playback briefly stops; window size and fullscreen are retained. This may clear accumulated buffering but does not guarantee lasting AV synchronization.
 - Audio goes to the default Windows playback device. Adjust volume in Windows.
 
 No settings panel, recording, network access, telemetry, administrator privileges or startup service. Only one AVerMedia device may be connected. The program writes a small diagnostic log to `%LOCALAPPDATA%\CaptureView\last-run.log`, replaced on each launch. Normal playback saves no images or audio.
@@ -43,7 +44,7 @@ HDCP-protected sources are not supported or bypassed. Unplugging or changing dev
 
 ## Build from source
 
-Prerequisites: Windows x64, stable Rust **1.93 or later**, and Visual Studio Build Tools with **Desktop development with C++** plus a Windows SDK. Use the `x86_64-pc-windows-msvc` toolchain.
+Prerequisites: Windows x64, Rust **1.93.0**, pinned by `rust-toolchain.toml` (minimum supported Rust: 1.93), and Visual Studio Build Tools with **Desktop development with C++** plus a Windows SDK. Use the `x86_64-pc-windows-msvc` toolchain.
 
 ```powershell
 cargo build --release --locked
@@ -58,11 +59,11 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-For the optional hardware test, see [TESTING.md](docs/TESTING.md). CI performs static checks and unit tests, **not** capture-card validation.
+For the optional hardware test, see [TESTING.md](docs/TESTING.md). CI performs static checks, unit tests, packaging tests and opening-shell cancellation with a simulated delay, **not** capture-card validation.
 
 ## Package for distribution
 
-After a release build, run `python scripts/package.py` (Python 3.10+). It produces a portable binary ZIP with dependency license texts, a source ZIP from an explicit allowlist, and SHA256SUMS.txt under `dist/`. Diagnostic frames, logs and build caches are excluded. Nothing is uploaded or published by this command.
+Run `python scripts/package.py` (Python 3.10+). The script performs a locked release build before packaging, uses Cargo’s reported executable path (including custom target directories), and checks the Windows x64 GUI PE structure. Use `python scripts/package.py --target x86_64-pc-windows-msvc` for an explicit target build. Do not edit sources concurrently with packaging. It produces a portable binary ZIP with dependency license texts, a source ZIP from an explicit allowlist, and SHA256SUMS.txt under `dist/`. Diagnostic frames, logs and build caches are excluded. Both ZIPs and SHA-256 sums are validated in temporary files before replacing previous results; ordinary publication errors roll back previous outputs. The three-file replacement is not atomic against power loss. Nothing is uploaded or published by this command.
 
 ## Troubleshooting
 

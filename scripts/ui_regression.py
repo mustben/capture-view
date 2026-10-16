@@ -5,8 +5,21 @@ Run after copying the release binary to CaptureView.exe in the repository root.
 import ctypes as c
 from ctypes import wintypes as w
 from pathlib import Path
+import os
 import subprocess
 import time
+
+
+def wait_for(proc, condition, description, timeout=10):
+    deadline = time.monotonic()+timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise AssertionError(f'Process exited ({proc.returncode}) while waiting for {description}')
+        result = condition()
+        if result:
+            return result
+        time.sleep(.03)  # Poll interval, not proof of completion.
+    raise AssertionError(f'Timed out waiting for {description}; pid={proc.pid}')
 
 
 def run():
@@ -22,6 +35,12 @@ def run():
     u.GetWindowLongPtrW.argtypes = [w.HWND, c.c_int]
     u.GetWindowLongPtrW.restype = c.c_ssize_t
     u.PostMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]
+    class GUIThreadInfo(c.Structure):
+        _fields_ = [('cbSize', w.DWORD), ('flags', w.DWORD)] + [
+            (name, w.HWND) for name in ['active', 'focus', 'capture', 'menu', 'move', 'caret']
+        ] + [('rect', w.RECT)]
+    u.GetGUIThreadInfo.argtypes = [w.DWORD, c.POINTER(GUIThreadInfo)]
+    u.GetClassNameW.argtypes = [w.HWND, w.LPWSTR, c.c_int]
     u.EnumWindows.argtypes = [c.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM), w.LPARAM]
     callback_type = u.EnumWindows.argtypes[0]
     proc = subprocess.Popen([str(root/'CaptureView.exe')], cwd=root)
@@ -31,16 +50,27 @@ def run():
             nonlocal hwnd
             pid = w.DWORD()
             u.GetWindowThreadProcessId(handle, c.byref(pid))
-            if pid.value == proc.pid and u.GetWindow(handle, 5):
+            name = c.create_unicode_buffer(256)
+            u.GetClassNameW(handle, name, len(name))
+            if pid.value == proc.pid and name.value == 'CaptureViewWindow' and u.GetWindow(handle, 5):
                 hwnd = handle
                 return False
             return True
 
-        deadline = time.monotonic()+15
-        while hwnd is None and time.monotonic() < deadline:
+        def locate():
             u.EnumWindows(callback_type(find), 0)
-            time.sleep(.1)
-        assert hwnd is not None, 'Capture window/renderer did not open'
+            return hwnd
+        wait_for(proc, locate, 'CaptureViewWindow with video renderer (not an error dialog)', 20)
+        log_path = Path(os.environ['LOCALAPPDATA'])/'CaptureView/last-run.log'
+        def startup_confirmed():
+            try:
+                return 'Graph startup confirmed (S_OK, Running)' in log_path.read_text(encoding='utf-8')
+            except (FileNotFoundError, PermissionError):
+                return False
+        # The renderer HWND exists before its final layout is negotiated. The launched
+        # process truncates its log before creating any window; do not measure the
+        # initial aspect until that process confirms S_OK/Running.
+        wait_for(proc, startup_confirmed, 'confirmed graph startup before geometry measurement', 15)
 
         def size(handle, client=False):
             rect = w.RECT()
@@ -62,38 +92,63 @@ def run():
         before = size(hwnd, True)
         # SC_SIZE + WMSZ_BOTTOMRIGHT starts Windows' real nested move/size loop.
         post(hwnd, 0x112, 0xF008)
-        time.sleep(.25)
+        thread_id = u.GetWindowThreadProcessId(hwnd, None)
+        def sizing():
+            info = GUIThreadInfo()
+            info.cbSize = c.sizeof(info)
+            assert u.GetGUIThreadInfo(thread_id, c.byref(info)), c.WinError(c.get_last_error())
+            return bool(info.flags & 2)  # GUI_INMOVESIZE
+        wait_for(proc, sizing, 'entry into Windows modal sizing loop')
         for vk in [0x27]*12 + [0x28]*8 + [0x0D]:
             key(vk)
-            time.sleep(.03)
-        time.sleep(.3)
-        resized = size(hwnd, True)
-        assert resized != before, 'Native modal resize did not change the window'
+        wait_for(proc, lambda: not sizing(), 'exit from Windows modal sizing loop')
+        resized = wait_for(proc, lambda: size(hwnd, True) if size(hwnd, True) != before else None,
+                           'native modal resize')
         cw, ch = resized
-        rw, rh = size(child)
         ew = min(cw, round(ch*aspect))
         eh = min(ch, round(cw/aspect))
-        assert abs(rw-ew) <= 2 and abs(rh-eh) <= 2, (resized, (rw,rh), (ew,eh))
+        def renderer_fits():
+            rw, rh = size(child)
+            return (rw, rh) if abs(rw-ew) <= 2 and abs(rh-eh) <= 2 else None
+        rw, rh = wait_for(proc, renderer_fits, f'renderer fit for client {resized}, expected {(ew, eh)}')
 
         def fullscreen():
             return bool(u.GetWindowLongPtrW(hwnd, -16) & 0x80000000)
 
+        # Explicit hardware-only refresh: exercise the real renderer's keyboard forwarding.
+        def refresh_count():
+            try:
+                return log_path.read_text(encoding='utf-8').count('Refresh confirmed:')
+            except (FileNotFoundError, PermissionError):
+                return 0
+        def refresh():
+            previous = refresh_count()
+            child = u.GetWindow(hwnd, 5)
+            post(child, 0x100, 0x74)  # F5 on the real video child
+            post(child, 0x101, 0x74)
+            wait_for(proc, lambda: refresh_count() > previous, 'video/audio graph refresh confirmation', 30)
+            self_child = u.GetWindow(hwnd, 5)  # old renderer HWND was destroyed
+            assert self_child, 'Refreshed graph has no renderer child'
+            return self_child
+        child = refresh()
+        assert not fullscreen() and size(hwnd, True) == resized, 'Refresh changed window placement'
+        rw, rh = size(child)
+
         # Send the double-click to the actual VIDEO CHILD, not the parent shell.
         post(child, 0x203, 1, ((rh//2)<<16) | (rw//2))
-        time.sleep(.3)
-        assert fullscreen(), 'Video-surface double-click was not forwarded'
+        wait_for(proc, fullscreen, 'video-surface double-click fullscreen')
         key(0x1B)
-        time.sleep(.3)
-        assert not fullscreen() and size(hwnd, True) == resized, 'Escape did not restore placement'
+        wait_for(proc, lambda: not fullscreen() and size(hwnd, True) == resized, 'Escape placement restoration')
         key(0x7A)
-        time.sleep(.3)
-        assert fullscreen(), 'F11 did not enter fullscreen'
+        wait_for(proc, fullscreen, 'F11 fullscreen')
+        fullscreen_size = size(hwnd, True)
+        child = refresh()
+        assert fullscreen() and size(hwnd, True) == fullscreen_size, 'Refresh lost fullscreen placement'
         key(0x1B)
-        time.sleep(.3)
-        assert not fullscreen() and size(hwnd, True) == resized
+        wait_for(proc, lambda: not fullscreen() and size(hwnd, True) == resized, 'final placement restoration')
         post(hwnd, 0x10)
         assert proc.wait(timeout=10) == 0, 'Normal close failed'
-        print('PASS: native modal resize and renderer fit; child-video double-click; F11/Escape; exact size restoration; normal close')
+        print('PASS: native modal resize and renderer fit; child-video double-click; F11/Escape; exact size restoration; windowed/fullscreen F5 refresh; normal close')
         print({'before': before, 'resized': resized, 'renderer': (rw,rh)})
     finally:
         if proc.poll() is None:

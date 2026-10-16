@@ -1,4 +1,4 @@
-//! One native window and graph on one STA; this loop owns all application state.
+//! Responsive opening shell plus a viewer STA which exclusively owns its COM graph.
 use crate::{capture, window};
 use std::{
     fs::{File, OpenOptions},
@@ -10,7 +10,7 @@ use windows::core::w;
 struct ComApartment;
 impl ComApartment {
     fn new() -> windows::core::Result<Self> {
-        // SAFETY: called once on the main thread before creating COM objects.
+        // SAFETY: called once on the viewer thread before creating COM objects.
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
         }
@@ -30,12 +30,59 @@ fn log_line(log: &mut Option<File>, text: &str) {
         let _ = writeln!(file, "{text}");
     }
 }
-fn run(smoke: bool, log: &mut Option<File>) -> Result<(), Box<dyn std::error::Error>> {
+fn finish_open<T, E>(result: Result<T, E>, cancelled: bool) -> Result<Option<T>, E> {
+    if cancelled {
+        Ok(None)
+    } else {
+        result.map(Some)
+    }
+}
+fn open_capture(
+    hwnd: windows::Win32::Foundation::HWND,
+    log: &mut Option<File>,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> windows::core::Result<Option<capture::Capture>> {
+    let result = capture::Capture::open(hwnd, &mut |s| log_line(log, s));
+    let cancelled = cancelled.load(std::sync::atomic::Ordering::Acquire);
+    if cancelled && let Err(error) = &result {
+        log_line(
+            log,
+            &format!("Opening failed after cancellation (dialog suppressed): {error}"),
+        );
+    }
+    // A successful but cancelled graph is dropped here on its creating STA.
+    finish_open(result, cancelled)
+}
+fn run_viewer(
+    smoke: bool,
+    log: &mut Option<File>,
+    cancelled: &std::sync::atomic::AtomicBool,
+    notify: window::StatusTarget,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _com = ComApartment::new()?;
     let mut window = window::Window::new()?;
     // Reverse drop order guarantees graph -> window -> COM apartment.
-    let mut graph = capture::Capture::open(window.hwnd, &mut |s| log_line(log, s))?;
-    window.show(graph.audio)?;
+    // Explicit test hook; no hardware is simulated by this delay.
+    if let Ok(delay) = std::env::var("CAPTUREVIEW_TEST_OPEN_DELAY_MS") {
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(delay.parse::<u64>()?.min(60_000));
+        while std::time::Instant::now() < deadline {
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(());
+    }
+    let Some(mut graph) = open_capture(window.hwnd, log, cancelled)? else {
+        return Ok(()); // graph -> hidden viewer owner -> COM, all on this STA.
+    };
+    window.start_polling()?;
+    let mut startup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut confirmed = false;
+    let mut refreshing = false;
     let (w, h) = window.client_size()?;
     graph.resize(w, h)?;
     let mut msg = MSG::default();
@@ -52,7 +99,7 @@ fn run(smoke: bool, log: &mut Option<File>) -> Result<(), Box<dyn std::error::Er
     ];
     let mut original = (0, 0);
     loop {
-        // SAFETY: MSG is writable; the main STA pumps its own messages.
+        // SAFETY: MSG is writable; the viewer STA pumps its own messages.
         let status = unsafe { GetMessageW(&mut msg, None, 0, 0).0 };
         if status == -1 {
             return Err(windows::core::Error::from_thread().into());
@@ -60,12 +107,70 @@ fn run(smoke: bool, log: &mut Option<File>) -> Result<(), Box<dyn std::error::Er
         if status == 0 {
             break;
         }
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            break;
+        }
         match msg.message {
             window::TOGGLE if msg.hwnd == window.hwnd => window.toggle()?,
             window::KEY if msg.hwnd == window.hwnd => window.key(msg.wParam.0)?,
+            window::REFRESH if msg.hwnd == window.hwnd => {
+                if !confirmed {
+                    window.finish_refresh_request();
+                    continue;
+                }
+                log_line(log, "Refresh requested: rebuilding video and audio graph.");
+                // Keep geometry/fullscreen and HWND ownership; release the entire old graph first.
+                window.hide();
+                notify.refreshing()?;
+                drop(graph);
+                if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    return Ok(());
+                }
+                let Some(reopened) = open_capture(window.hwnd, log, cancelled)
+                    .map_err(|error| format!("Impossible de rafraîchir le flux : {error}"))?
+                else {
+                    return Ok(());
+                };
+                graph = reopened;
+                // Callback-side pending flag suppresses additional requests throughout reopen.
+                window.finish_refresh_request();
+                let (w, h) = window.client_size()?;
+                graph.resize(w, h)?;
+                window.start_polling()?;
+                window.title("CaptureView — redémarrage du flux…")?;
+                confirmed = false;
+                refreshing = true;
+                startup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            }
             WM_TIMER if msg.hwnd == window.hwnd && msg.wParam.0 == 1 => {
                 if let Some(error) = graph.drain_error() {
                     return Err(error.into());
+                }
+                if !confirmed {
+                    let state = graph.state()?;
+                    let expired = std::time::Instant::now() >= startup_deadline;
+                    if crate::graph_state::startup_confirmed(&state, expired)
+                        .map_err(|error| format!("{error}: {state:?}"))?
+                    {
+                        confirmed = true;
+                        checks[2] = true;
+                        log_line(
+                            log,
+                            "Graph startup confirmed (S_OK, Running); HDMI activity/audio audibility not measured.",
+                        );
+                        if refreshing {
+                            log_line(
+                                log,
+                                "Refresh confirmed: new video/audio graph is Running; AV synchronization not measured.",
+                            );
+                            refreshing = false;
+                        }
+                        window.show(graph.audio)?;
+                        notify.ready()?;
+                    } else {
+                        window.title("CaptureView — démarrage vidéo en cours…")?;
+                        continue;
+                    }
                 }
                 if smoke {
                     step += 1;
@@ -148,6 +253,63 @@ fn run(smoke: bool, log: &mut Option<File>) -> Result<(), Box<dyn std::error::Er
     }
     Ok(())
 }
+fn run(smoke: bool, log: &mut Option<File>) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    let opening = window::Window::new()?;
+    opening.show_opening()?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = Arc::clone(&cancelled);
+    let status_target = opening.status_target();
+    let (done_tx, done_rx) = mpsc::channel();
+    let mut worker_log = log.as_ref().and_then(|file| file.try_clone().ok());
+    // Only a non-owning status-message destination crosses threads. Each UI thread
+    // creates/destroys its own HWND; every COM interface stays on the viewer STA.
+    let worker = std::thread::spawn(move || {
+        let result = run_viewer(smoke, &mut worker_log, &worker_cancelled, status_target)
+            .map_err(|error| error.to_string());
+        let _ = done_tx.send(result);
+    });
+    let mut msg = MSG::default();
+    let result = loop {
+        match done_rx.try_recv() {
+            Ok(result) => break result,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                break Err("Viewer thread stopped unexpectedly".into());
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        // SAFETY: writable MSG; opening thread continues pumping throughout driver calls.
+        let status = unsafe { GetMessageW(&mut msg, None, 0, 0).0 };
+        if status == -1 {
+            cancelled.store(true, Ordering::Release);
+            // Exceptional message-loop failure: wait for orderly worker-owned COM teardown.
+            break Err(windows::core::Error::from_thread().to_string());
+        }
+        if status == 0 {
+            cancelled.store(true, Ordering::Release);
+            let _ = opening.title("CaptureView — fermeture demandée, attente du pilote…");
+            // WM_CLOSE does not destroy the owner. No forced termination of COM/driver calls.
+            continue;
+        }
+        // Keep the status shell independent from viewer controls.
+        if msg.message != window::TOGGLE
+            && msg.message != window::KEY
+            && msg.message != window::REFRESH
+        {
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    };
+    cancelled.store(true, Ordering::Release);
+    worker.join().map_err(|_| "Viewer thread panicked")?;
+    result.map_err(Into::into)
+}
 pub fn main() {
     let smoke = std::env::args().any(|a| a == "--smoke-test");
     let dir =
@@ -179,5 +341,39 @@ pub fn main() {
             }
         }
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn normal_open_preserves_success_and_failure() {
+        assert_eq!(super::finish_open::<u8, &str>(Ok(7), false), Ok(Some(7)));
+        assert_eq!(
+            super::finish_open::<u8, &str>(Err("driver failure"), false),
+            Err("driver failure")
+        );
+    }
+    #[test]
+    fn cancellation_drops_an_opened_resource() {
+        use std::{cell::Cell, rc::Rc};
+        struct Resource(Rc<Cell<bool>>);
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        let dropped = Rc::new(Cell::new(false));
+        let result =
+            super::finish_open::<_, &str>(Ok(Resource(Rc::clone(&dropped))), true).unwrap();
+        assert!(result.is_none());
+        assert!(dropped.get());
+    }
+    #[test]
+    fn cancellation_dismisses_a_late_open_error() {
+        assert_eq!(
+            super::finish_open::<(), &str>(Err("driver failure"), true),
+            Ok(None)
+        );
     }
 }

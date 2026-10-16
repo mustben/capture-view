@@ -7,9 +7,11 @@ cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 cargo build --release --locked
+python -m unittest discover -s scripts -p "test_*.py"
+python scripts/package.py
 ```
 
-Unit tests exercise small/portrait/4:3 layouts, invalid dimensions, and the native close-before-destroy lifetime regression. They do not simulate capture hardware.
+Unit tests exercise layouts, unreadable/ambiguous/missing-device selection, checked BMP headers/palettes/bounds, intermediate HRESULTs and confirmation deadlines, and the native close-before-destroy lifetime regression. Python tests inject malformed PE files and packaging/publication failures and verify Cargo artifact paths, licenses, ZIP entries and checksums. CI separately tests a visible, responsive opening shell and cancellation during a simulated delay before driver access. They do not simulate capture hardware.
 
 ## Real hardware smoke test
 
@@ -51,6 +53,14 @@ This launches only its own viewer process. It starts the real Windows modal sizi
 
 Do not promote this to broad model compatibility or invent latency benchmarks. A future compatibility contribution should state exact device model, driver, Windows build, USB connection, video format and whether both picture and audible sound were tested.
 
+## Integration follow-up validation
+
+- Reproduced the proposed UI test failure before changing it: initial renderer aspect was sampled before the graph reached S_OK/Running. The hardware UI script now waits for the launched process's explicit startup confirmation before measuring geometry.
+- Added native Rust regression tests for status-shell notification handling outside the outer app loop, cancellation winning over late Ready messages, late opening errors, and cleanup of a successfully opened-but-cancelled resource.
+- Status handoff uses window messages instead of polling a Ready channel from the outer loop, so modal move/size/menu loops cannot defer it. The viewer remains hidden until startup confirmation. A real GC550 run verified shell handoff while actively inside Windows' sizing loop, with only the viewer visible after confirmation.
+- Cancelled initial/refresh failures are logged without an error dialog; genuine failures still propagate. Driver calls themselves remain non-cancellable.
+- Windows validation: 18 Rust tests, Python packaging tests, explicit opening-cancellation test, GC550 hardware smoke, repeated native UI tests with windowed/fullscreen F5, release build and real packaging passed. No end-to-end latency or long-session AV-drift guarantee is implied.
+
 ## Manual acceptance checklist
 
 - [ ] Active HDMI picture (motion) and audible sound, correct channels.
@@ -60,3 +70,28 @@ Do not promote this to broad model compatibility or invent latency benchmarks. A
 - [ ] Multiple displays and DPI scales; fullscreen restores previous placement.
 - [ ] Close then reopen; OBS can reacquire the device after CaptureView closes.
 - [ ] Explicit, recoverable error for unplugged/in-use devices; no leftover process.
+
+## Acceptance for review corrections
+
+Use Rust 1.93.0 from `rust-toolchain.toml`. The per-ID assessment and slow-opening simulation procedure are in [REVIEW_CORRECTIONS.md](REVIEW_CORRECTIONS.md). To run the CI opening-shell test manually on Windows without capture hardware:
+
+```powershell
+$env:CAPTUREVIEW_TEST_EXE = (Resolve-Path target/release/capture-view.exe).Path
+python scripts/test_opening.py
+Remove-Item Env:CAPTUREVIEW_TEST_EXE
+```
+
+This proves message processing and cancellation during a simulated pre-driver delay only. Test normal opening, no device, occupied device, close during actual driver opening, and device reacquisition separately on real hardware. Inspect the generated BMP locally; do not upload the private frame.
+
+For mixed DPI, use two monitors with different scale factors (for example 100% and 150%): move the window in both directions, enter fullscreen on each, change scale while fullscreen, leave fullscreen and verify usable restored position and size. Record Windows build, scales and observed geometry. No mixed-DPI defect has been reproduced during this correction; that path is unchanged.
+
+## Manual refresh acceptance (real hardware)
+
+F5 and right-click → Rafraîchir le flux rebuild both video and audio. The native UI regression also sends F5 through the actual video child, waits for the new graph's confirmation in the local log, reacquires its renderer HWND, and checks windowed/fullscreen placement restoration. This remains hardware-only and opt-in.
+
+- Start with live HDMI motion and audible audio. If drift occurs, note it, press F5 and check both picture and audible sound afterwards. Graph confirmation alone cannot verify synchronization.
+- Repeat using the right-click menu. Verify aspect ratio, window size, fullscreen and the original restored placement.
+- Test several manual refreshes, held F5 (no auto-repeat reopen loop), an occupied/disconnected device on reopen, and close during a slow refresh. A blocked driver must return before graceful cleanup completes.
+- Run at least 30 minutes after refresh to assess whether drift returns. Record driver/output device and the observations without publishing private media.
+
+The automated Windows shell tests cover shortcut routing and key-repeat suppression without a device. They do not demonstrate AV resynchronization; no real-card refresh test was run in the hosted development environment.
