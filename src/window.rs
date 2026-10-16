@@ -218,7 +218,13 @@ impl Window {
         let mut msg = MSG::default();
         // SAFETY: remove only queued refresh commands for this live owner on its thread.
         unsafe {
-            while PeekMessageW(&mut msg, Some(self.hwnd), REFRESH, REFRESH, PM_REMOVE).as_bool() {}
+            while PeekMessageW(&mut msg, Some(self.hwnd), REFRESH, REFRESH, PM_REMOVE).as_bool() {
+                // PeekMessage retrieves WM_QUIT even outside its filter range.
+                if msg.message == WM_QUIT {
+                    PostQuitMessage(msg.wParam.0 as i32);
+                    break;
+                }
+            }
         }
     }
     pub fn key(&mut self, key: usize) -> Result<()> {
@@ -335,6 +341,18 @@ mod tests {
             assert!(
                 !PeekMessageW(&mut msg, Some(window.hwnd), REFRESH, REFRESH, PM_REMOVE).as_bool()
             );
+        }
+    }
+    #[test]
+    fn refresh_coalescing_preserves_close_request() {
+        let window = Window::new().unwrap();
+        let mut msg = MSG::default();
+        // SAFETY: own thread's quit flag; consume it after checking preservation.
+        unsafe {
+            PostQuitMessage(0);
+            window.discard_refresh_requests();
+            assert!(PeekMessageW(&mut msg, None, WM_QUIT, WM_QUIT, PM_REMOVE).as_bool());
+            assert_eq!(msg.message, WM_QUIT);
         }
     }
     #[test]
