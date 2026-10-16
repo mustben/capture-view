@@ -5,6 +5,7 @@ Run after copying the release binary to CaptureView.exe in the repository root.
 import ctypes as c
 from ctypes import wintypes as w
 from pathlib import Path
+import os
 import subprocess
 import time
 
@@ -104,6 +105,26 @@ def run():
         def fullscreen():
             return bool(u.GetWindowLongPtrW(hwnd, -16) & 0x80000000)
 
+        # Explicit hardware-only refresh: exercise the real renderer's keyboard forwarding.
+        log_path = Path(os.environ['LOCALAPPDATA'])/'CaptureView/last-run.log'
+        def refresh_count():
+            try:
+                return log_path.read_text(encoding='utf-8').count('Refresh confirmed:')
+            except (FileNotFoundError, PermissionError):
+                return 0
+        def refresh():
+            previous = refresh_count()
+            child = u.GetWindow(hwnd, 5)
+            post(child, 0x100, 0x74)  # F5 on the real video child
+            post(child, 0x101, 0x74)
+            wait_for(proc, lambda: refresh_count() > previous, 'video/audio graph refresh confirmation', 30)
+            self_child = u.GetWindow(hwnd, 5)  # old renderer HWND was destroyed
+            assert self_child, 'Refreshed graph has no renderer child'
+            return self_child
+        child = refresh()
+        assert not fullscreen() and size(hwnd, True) == resized, 'Refresh changed window placement'
+        rw, rh = size(child)
+
         # Send the double-click to the actual VIDEO CHILD, not the parent shell.
         post(child, 0x203, 1, ((rh//2)<<16) | (rw//2))
         wait_for(proc, fullscreen, 'video-surface double-click fullscreen')
@@ -111,11 +132,14 @@ def run():
         wait_for(proc, lambda: not fullscreen() and size(hwnd, True) == resized, 'Escape placement restoration')
         key(0x7A)
         wait_for(proc, fullscreen, 'F11 fullscreen')
+        fullscreen_size = size(hwnd, True)
+        child = refresh()
+        assert fullscreen() and size(hwnd, True) == fullscreen_size, 'Refresh lost fullscreen placement'
         key(0x1B)
         wait_for(proc, lambda: not fullscreen() and size(hwnd, True) == resized, 'final placement restoration')
         post(hwnd, 0x10)
         assert proc.wait(timeout=10) == 0, 'Normal close failed'
-        print('PASS: native modal resize and renderer fit; child-video double-click; F11/Escape; exact size restoration; normal close')
+        print('PASS: native modal resize and renderer fit; child-video double-click; F11/Escape; exact size restoration; windowed/fullscreen F5 refresh; normal close')
         print({'before': before, 'resized': resized, 'renderer': (rw,rh)})
     finally:
         if proc.poll() is None:

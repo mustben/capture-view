@@ -35,3 +35,9 @@ One AVerMedia source, one default Windows audio output, aspect-preserving previe
 No claim of zero-copy inside Windows or the vendor driver, nor of measured end-to-end latency. VMR9 is older than DXGI/modern Media Foundation renderers, but keeps dependencies and implementation size small for this DirectShow-only device. Changing renderers needs real hardware/latency measurements, not assumptions about language speed.
 
 Diagnostic snapshots support checked BITMAPINFOHEADER/BI_RGB DIBs at 1/4/8/24/32 bits, including palettes. Masks, compressed formats and extended headers are explicitly rejected; this restriction affects only snapshots. Playback resume is attempted on every snapshot path and combined errors retain both capture and resume failures.
+
+## Manual stream refresh
+
+F5 (ignoring key repeat) and the video-surface right-click menu post a REFRESH command to the viewer loop. The viewer hides its HWND, notifies the independent status shell, drops the old Capture completely (stop, detach, release all video/audio graph references), then opens a fresh graph on the same viewer STA and HWND. It retains window/fullscreen placement, refits the new renderer and resets the startup-confirmation deadline. Queued refresh requests are coalesced; refresh is ignored until startup is confirmed. There is never a second live Capture graph.
+
+The status shell processes cancellation during stop/open, subject to the same non-cancellable-driver limitations as initial opening. Reopening failures are logged and reported, with normal owner/COM teardown. Successful refresh means a fresh graph has reached S_OK/Running; it does not measure AV synchronization or prove that a driver/clock drift problem is permanently fixed. No media recording or automatic periodic reset is added.

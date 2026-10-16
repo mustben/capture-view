@@ -76,3 +76,14 @@ Remove-Item Env:CAPTUREVIEW_TEST_EXE
 This proves message processing and cancellation during a simulated pre-driver delay only. Test normal opening, no device, occupied device, close during actual driver opening, and device reacquisition separately on real hardware. Inspect the generated BMP locally; do not upload the private frame.
 
 For mixed DPI, use two monitors with different scale factors (for example 100% and 150%): move the window in both directions, enter fullscreen on each, change scale while fullscreen, leave fullscreen and verify usable restored position and size. Record Windows build, scales and observed geometry. No mixed-DPI defect has been reproduced during this correction; that path is unchanged.
+
+## Manual refresh acceptance (real hardware)
+
+F5 and right-click → Rafraîchir le flux rebuild both video and audio. The native UI regression also sends F5 through the actual video child, waits for the new graph's confirmation in the local log, reacquires its renderer HWND, and checks windowed/fullscreen placement restoration. This remains hardware-only and opt-in.
+
+- Start with live HDMI motion and audible audio. If drift occurs, note it, press F5 and check both picture and audible sound afterwards. Graph confirmation alone cannot verify synchronization.
+- Repeat using the right-click menu. Verify aspect ratio, window size, fullscreen and the original restored placement.
+- Test several manual refreshes, held F5 (no auto-repeat reopen loop), an occupied/disconnected device on reopen, and close during a slow refresh. A blocked driver must return before graceful cleanup completes.
+- Run at least 30 minutes after refresh to assess whether drift returns. Record driver/output device and the observations without publishing private media.
+
+The automated Windows shell tests cover shortcut routing and key-repeat suppression without a device. They do not demonstrate AV resynchronization; no real-card refresh test was run in the hosted development environment.

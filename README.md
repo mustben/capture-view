@@ -21,6 +21,7 @@ Download and extract **CaptureView-windows-x64.zip** from [Releases](https://git
 - Drag the window edges to resize. The image keeps its aspect ratio.
 - Double-click the picture or press **F11** to toggle fullscreen.
 - **Escape** leaves fullscreen. **Alt+F4** or the close button exits.
+- Press **F5** or right-click the picture → **Rafraîchir le flux** to rebuild video and audio together if they drift out of sync. Playback briefly stops; window size and fullscreen are retained. This may clear accumulated buffering but does not guarantee lasting AV synchronization.
 - Audio goes to the default Windows playback device. Adjust volume in Windows.
 
 No settings panel, recording, network access, telemetry, administrator privileges or startup service. Only one AVerMedia device may be connected. The program writes a small diagnostic log to `%LOCALAPPDATA%\CaptureView\last-run.log`, replaced on each launch. Normal playback saves no images or audio.

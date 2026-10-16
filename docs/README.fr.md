@@ -10,6 +10,8 @@ Une fenêtre qui affiche le boîtier d'acquisition et joue son audio. Rien de pl
 
 Redimensionner en tirant les bords. Double-cliquer sur l'image ou appuyer sur **F11** pour le plein écran. **Échap** revient à la fenêtre. La croix ou **Alt+F4** ferme l'application et libère le boîtier.
 
+**Rafraîchir le flux** : appuyer sur **F5** ou faire un clic droit sur l’image puis choisir **Rafraîchir le flux**. L’application libère puis rouvre le boîtier pour relancer ensemble la vidéo et l’audio, avec une brève interruption. La taille de fenêtre et le plein écran sont conservés. Cela peut résorber un décalage accumulé, sans garantir qu’il ne réapparaisse pas. Une fenêtre d’attente reste réactive pendant la réouverture ; sa fermeture demande l’annulation, qui attend le retour d’un éventuel appel bloqué dans le pilote. Si la réouverture échoue, l’application affiche l’erreur et se ferme.
+
 Le son est envoyé à la sortie audio Windows par défaut ; le volume se règle dans Windows. Aucun panneau d'options, compte, réseau, service ou démarrage automatique. Aucune modification du pilote ou d'OBS.
 
 ## État de validation

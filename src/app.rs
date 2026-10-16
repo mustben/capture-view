@@ -30,11 +30,15 @@ fn log_line(log: &mut Option<File>, text: &str) {
         let _ = writeln!(file, "{text}");
     }
 }
+enum ViewerStatus {
+    Refreshing,
+    Ready,
+}
 fn run_viewer(
     smoke: bool,
     log: &mut Option<File>,
     cancelled: &std::sync::atomic::AtomicBool,
-    ready: std::sync::mpsc::Sender<()>,
+    notify: std::sync::mpsc::Sender<ViewerStatus>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _com = ComApartment::new()?;
     let mut window = window::Window::new()?;
@@ -58,9 +62,10 @@ fn run_viewer(
         return Ok(()); // graph -> hidden viewer owner -> COM, all on this STA.
     }
     window.show(graph.audio)?;
-    let _ = ready.send(());
-    let startup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let _ = notify.send(ViewerStatus::Ready);
+    let mut startup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut confirmed = false;
+    let mut refreshing = false;
     let (w, h) = window.client_size()?;
     graph.resize(w, h)?;
     let mut msg = MSG::default();
@@ -91,6 +96,34 @@ fn run_viewer(
         match msg.message {
             window::TOGGLE if msg.hwnd == window.hwnd => window.toggle()?,
             window::KEY if msg.hwnd == window.hwnd => window.key(msg.wParam.0)?,
+            window::REFRESH if msg.hwnd == window.hwnd => {
+                if !confirmed {
+                    continue;
+                }
+                log_line(log, "Refresh requested: rebuilding video and audio graph.");
+                // Keep geometry/fullscreen and HWND ownership; release the entire old graph first.
+                window.hide();
+                let _ = notify.send(ViewerStatus::Refreshing);
+                drop(graph);
+                if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    return Ok(());
+                }
+                graph = capture::Capture::open(window.hwnd, &mut |s| log_line(log, s))
+                    .map_err(|error| format!("Impossible de rafraîchir le flux : {error}"))?;
+                if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    return Ok(());
+                }
+                // Coalesce presses made while the driver was opening; never queue rebuilds.
+                window.discard_refresh_requests();
+                let (w, h) = window.client_size()?;
+                graph.resize(w, h)?;
+                window.show(graph.audio)?;
+                window.title("CaptureView — redémarrage du flux…")?;
+                let _ = notify.send(ViewerStatus::Ready);
+                confirmed = false;
+                refreshing = true;
+                startup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            }
             WM_TIMER if msg.hwnd == window.hwnd && msg.wParam.0 == 1 => {
                 if let Some(error) = graph.drain_error() {
                     return Err(error.into());
@@ -107,6 +140,13 @@ fn run_viewer(
                             log,
                             "Graph startup confirmed (S_OK, Running); HDMI activity/audio audibility not measured.",
                         );
+                        if refreshing {
+                            log_line(
+                                log,
+                                "Refresh confirmed: new video/audio graph is Running; AV synchronization not measured.",
+                            );
+                            refreshing = false;
+                        }
                         window.show(graph.audio)?;
                     } else {
                         window.title("CaptureView — démarrage vidéo en cours…")?;
@@ -215,8 +255,16 @@ fn run(smoke: bool, log: &mut Option<File>) -> Result<(), Box<dyn std::error::Er
     });
     let mut msg = MSG::default();
     let result = loop {
-        if ready_rx.try_recv().is_ok() && !cancelled.load(Ordering::Acquire) {
-            opening.hide();
+        for status in ready_rx.try_iter() {
+            if !cancelled.load(Ordering::Acquire) {
+                match status {
+                    ViewerStatus::Refreshing => {
+                        let _ = opening.show_opening();
+                        let _ = opening.title("CaptureView — rafraîchissement du flux…");
+                    }
+                    ViewerStatus::Ready => opening.hide(),
+                }
+            }
         }
         match done_rx.try_recv() {
             Ok(result) => break result,
@@ -239,7 +287,10 @@ fn run(smoke: bool, log: &mut Option<File>) -> Result<(), Box<dyn std::error::Er
             continue;
         }
         // Keep the status shell independent from viewer controls.
-        if msg.message != window::TOGGLE && msg.message != window::KEY {
+        if msg.message != window::TOGGLE
+            && msg.message != window::KEY
+            && msg.message != window::REFRESH
+        {
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);

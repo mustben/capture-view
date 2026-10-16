@@ -7,7 +7,7 @@ use windows::{
         Graphics::Gdi::*,
         System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Input::KeyboardAndMouse::{VK_ESCAPE, VK_F11},
+            Input::KeyboardAndMouse::{VK_ESCAPE, VK_F5, VK_F11},
             WindowsAndMessaging::*,
         },
     },
@@ -40,6 +40,36 @@ pub fn resize_renderer(hwnd: HWND) {
 }
 pub const TOGGLE: u32 = WM_APP + 2;
 pub const KEY: u32 = WM_APP + 3;
+pub const REFRESH: u32 = WM_APP + 4;
+
+fn refresh_menu(hwnd: HWND) -> Result<()> {
+    // SAFETY: native popup is used on the owner thread, then destroyed even on error.
+    unsafe {
+        let menu = CreatePopupMenu()?;
+        let result = (|| {
+            AppendMenuW(menu, MF_STRING, 1, w!("Rafraîchir le flux\tF5"))?;
+            let mut point = POINT::default();
+            GetCursorPos(&mut point)?;
+            if TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                point.x,
+                point.y,
+                None,
+                hwnd,
+                None,
+            )
+            .0 == 1
+            {
+                PostMessageW(Some(hwnd), REFRESH, WPARAM(0), LPARAM(0))?;
+            }
+            Ok(())
+        })();
+        let _ = DestroyMenu(menu);
+        result
+    }
+}
+
 unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     // SAFETY: Win32 supplies valid message parameters; no Rust pointers are dereferenced.
     unsafe {
@@ -50,6 +80,19 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: 
             }
             WM_LBUTTONDBLCLK => {
                 let _ = PostMessageW(Some(hwnd), TOGGLE, wp, lp);
+                LRESULT(0)
+            }
+            WM_RBUTTONUP | WM_CONTEXTMENU if RENDERER.with(|slot| slot.borrow().is_some()) => {
+                // Mouse context messages can follow the forwarded button-up; do not show twice.
+                if message == WM_RBUTTONUP || lp.0 == -1 {
+                    let _ = refresh_menu(hwnd);
+                }
+                LRESULT(0)
+            }
+            WM_KEYDOWN if wp.0 == VK_F5.0 as usize => {
+                if lp.0 & (1 << 30) == 0 {
+                    let _ = PostMessageW(Some(hwnd), REFRESH, wp, lp);
+                }
                 LRESULT(0)
             }
             WM_KEYDOWN if wp.0 == VK_F11.0 as usize || wp.0 == VK_ESCAPE.0 as usize => {
@@ -171,6 +214,13 @@ impl Window {
         }
         Ok(())
     }
+    pub fn discard_refresh_requests(&self) {
+        let mut msg = MSG::default();
+        // SAFETY: remove only queued refresh commands for this live owner on its thread.
+        unsafe {
+            while PeekMessageW(&mut msg, Some(self.hwnd), REFRESH, REFRESH, PM_REMOVE).as_bool() {}
+        }
+    }
     pub fn key(&mut self, key: usize) -> Result<()> {
         if key == VK_F11.0 as usize || (key == VK_ESCAPE.0 as usize && self.fullscreen) {
             self.toggle()?;
@@ -251,6 +301,42 @@ impl Drop for Window {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn f5_posts_one_refresh_and_ignores_key_repeat() {
+        let window = Window::new().unwrap();
+        let mut msg = MSG::default();
+        // SAFETY: synchronous input on this test's window/thread; inspect only REFRESH messages.
+        unsafe {
+            SendMessageW(
+                window.hwnd,
+                WM_KEYDOWN,
+                Some(WPARAM(VK_F5.0 as usize)),
+                Some(LPARAM(0)),
+            );
+            SendMessageW(
+                window.hwnd,
+                WM_KEYDOWN,
+                Some(WPARAM(VK_F5.0 as usize)),
+                Some(LPARAM(1 << 30)),
+            );
+            assert!(
+                PeekMessageW(&mut msg, Some(window.hwnd), REFRESH, REFRESH, PM_REMOVE).as_bool()
+            );
+            assert!(
+                !PeekMessageW(&mut msg, Some(window.hwnd), REFRESH, REFRESH, PM_REMOVE).as_bool()
+            );
+            SendMessageW(
+                window.hwnd,
+                WM_KEYDOWN,
+                Some(WPARAM(VK_F5.0 as usize)),
+                Some(LPARAM(0)),
+            );
+            window.discard_refresh_requests();
+            assert!(
+                !PeekMessageW(&mut msg, Some(window.hwnd), REFRESH, REFRESH, PM_REMOVE).as_bool()
+            );
+        }
+    }
     #[test]
     fn close_request_keeps_owner_alive_for_graph_teardown() {
         let window = Window::new().unwrap();
